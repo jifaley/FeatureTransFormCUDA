@@ -702,126 +702,6 @@ void tracingExtendKernel_warpShuffle_atomic(unsigned char* d_imagePtr, unsigned 
 	}
 }
 
-__global__
-void ftTracingExtendKernel_warpShuffle_atomic(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_frontier_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr,
-	int width, int height, int slice, int newSize, int compact_size, int* d_frontier_compact_2, unsigned char* d_activeMat_compact)
-{
-	int tid = blockDim.x * blockIdx.x + threadIdx.x;
-
-	__shared__ int blockLength;
-	__shared__ int blockOffset;
-
-	int warp_id = threadIdx.x / 32;
-	int lane_id = threadIdx.x % 32;
-	int pointId = blockIdx.x * blockDim.x / 32 + warp_id;
-
-	if (pointId >= compact_size) return;
-
-	int smallIdx, fullIdx;
-	smallIdx = d_frontier_compact[pointId];
-	if (d_activeMat_compact[smallIdx] != ALIVE) return;
-
-	
-	int curValue;
-	float curDist;
-
-	if (lane_id == 0)
-	{
-		smallIdx = d_frontier_compact[pointId];
-		curValue = d_imagePtr_compact[smallIdx];
-		curDist = d_distPtr[smallIdx];
-		fullIdx = d_decompress[smallIdx];
-	}
-
-	//Set initial value. The __shfl_sync function transmit(broadcast) values in the warp.
-	fullIdx = __shfl_sync(-1, fullIdx, 0);
-	curDist = __shfl_sync(-1, curDist, 0);
-	curValue = __shfl_sync(-1, curValue, 0);
-
-	int3 curPos;
-	curPos.z = fullIdx / (width * height);
-	curPos.y = fullIdx % (width * height) / width;
-	curPos.x = fullIdx % width;
-
-	int3 neighborPos;
-	int neighborIdx;
-	int neighborSmallIdx;
-	unsigned char neighborValue;
-
-	int k = lane_id;
-	int modified = 0;
-
-	if (k < 26)
-	{
-		neighborPos.x = curPos.x + dx3d26const[k];
-		neighborPos.y = curPos.y + dy3d26const[k];
-		neighborPos.z = curPos.z + dz3d26const[k];
-
-		if (neighborPos.x < 0 || neighborPos.x >= width || neighborPos.y < 0 || neighborPos.y >= height
-			|| neighborPos.z < 0 || neighborPos.z >= slice)
-			return;
-		neighborIdx = neighborPos.z * width * height + neighborPos.y * width + neighborPos.x;
-
-		neighborValue = d_imagePtr[neighborIdx];
-
-
-		neighborSmallIdx = d_compress[neighborIdx];
-		if (neighborSmallIdx == -1) return;
-
-		neighborValue = d_imagePtr_compact[neighborSmallIdx];
-		if (neighborValue == 0) return;
-
-		float EuclidDist = 1;
-		//EuclidDist = sqrtf(dx3d26const[k] * dx3d26const[k] + dy3d26const[k] * dy3d26const[k] + dz3d26const[k] * dz3d26const[k]);
-		//由于只有26个邻居，直接把对应的欧式距离存储起来了
-		////The distance of neighbors are stored at the constant memory.
-		EuclidDist = EuclidDistconst[k];
-		//两点之间的dist根据两点的欧式距离和亮度计算
-		//float deltaDist = gwdtFunc_gpu(EuclidDist, curValue, neighborValue);
-
-		if (neighborSmallIdx < 0)
-			printf("neighbor < 0!\n");
-
-
-		//在使用原子操作之前，进行一次快速检查。如果当前点连上阶段的邻居都更新不了，就放弃更新
-		//A fast check before atomic operations.
-		if (d_distPtr[neighborSmallIdx] - 1e-5 < curDist)
-			return;
-
-		float newDist = curDist;
-		//在dist的后面8个bit放入更新使用的方向k
-		newDist = __int_as_float(__float_as_int(newDist) & 0xFFFFFF00 | k);
-
-		//oldDist是atomicMin()返回的值，返回的是此次原子修改前的值,无论是否成功
-		int oldDist = atomicMin((int*)(d_updateDistPtr + neighborSmallIdx), __float_as_int(newDist));
-
-		//如果修改成功了
-		if (__int_as_float(oldDist) > newDist)
-		{
-			modified = 1;
-		}
-	}
-
-	int warpOffset;
-
-	if (modified)
-	{
-		//int pos = atomicAdd(&d_compact_size, 1);
-		//d_frontier_compact_2[pos] = neighborSmallIdx;
-
-		auto g = coalesced_threads();
-		int warp_res;
-		int rank = g.thread_rank();
-		if (rank == 0)
-			warp_res = atomicAdd(&d_compact_size, g.size());
-
-		warp_res = g.shfl(warp_res, 0);
-		int result = warp_res + rank;
-
-		d_frontier_compact_2[result] = neighborSmallIdx;
-	}
-}
-
 
 /*
 函数:tracingUpdateKernel
@@ -890,49 +770,6 @@ void tracingUpdateKernel(int* d_compress, int* d_decompress, int* d_frontier_com
 	d_activeMat_compact[smallIdx] = ALIVE;
 }
 
-__global__
-void ftTracingUpdateKernel(int* d_compress, int* d_decompress, int* d_frontier_compact, float* d_distPtr, float* d_updateDistPtr, unsigned char* parentSimplePtr_compact, unsigned char* d_activeMat_compact,
-	int width, int height, int slice, int newSize, int compact_size)
-{
-	int tid = threadIdx.x + blockIdx.x*blockDim.x;
-	if (tid == 0)
-		d_compact_size = 0;
-	if (tid >= compact_size) return;
-
-	//smallIdx: The index in the compressed image.
-	//fullIdx: The index in the original image. 
-	//These indices can be transformed to each other by "d_compress" or "d_decompress" array.
-	int smallIdx = d_frontier_compact[tid];
-	int fullIdx = d_decompress[smallIdx];
-
-
-	//更新之前的direction
-	//direction: One of the 26-way neighbor. This value stores the parent information of nodes. 
-	int direction = parentSimplePtr_compact[smallIdx];
-	//更新之前的seed(就是属于哪个种子)
-	//In common, one element is extended from one seed.
-	int z = fullIdx / (width * height);
-	int y = fullIdx % (width * height) / width;
-	int x = fullIdx % width;
-
-	//更新之后(存储再updateDist中的) dist和direction
-	float newDist = d_updateDistPtr[smallIdx];
-	int directionUpdate = __float_as_int(newDist) & 0xFF;
-
-	//更新之后的parent(根据directionUpdate计算)
-	//The renewed parent
-	int newParent;
-	if (directionUpdate == 0xff)
-		newParent = -1;
-	else
-		newParent = (z - dz3d26const[directionUpdate]) * width * height + (y - dy3d26const[directionUpdate]) * width + (x - dx3d26const[directionUpdate]);
-	int newParentSmallIdx = d_compress[newParent];
-
-
-	d_distPtr[smallIdx] = newDist;
-	parentSimplePtr_compact[smallIdx] = directionUpdate;
-	d_activeMat_compact[smallIdx] = ALIVE;
-}
 
 __global__
 void tracingPreprocessKernel(unsigned char* d_imagePtr, int* d_compress, int* seedArr, float* d_distPtr, float* d_updateDistPtr, unsigned char* d_activeMat_compact, int* d_frontier_compact, short int* d_seedNumberPtr, int width, int height, int slice, int seedCount)
@@ -1084,7 +921,7 @@ void buildInitNeuron(std::vector<int>& seedArr, unsigned char* d_imagePtr, unsig
 //预处理：把所有临近0的像素作为起始点，他们距离背景的距离即为他们的像素值
 //Preprocessing. Putting all of the voxels who have a background voxel as neighbor into the starting frontier.
 //The intital distance value is set as their voxel intensity.
-__global__ void ftPreProcessKernel(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr, int* d_frontier_compact, unsigned char* d_activeMat_compact,int width, int height, int slice, int newSize)
+__global__ void ftPreProcessKernel(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr, int* d_frontier_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize)
 {
 	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
 	if (smallIdx >= newSize) return;
@@ -1130,6 +967,190 @@ __global__ void ftPreProcessKernel(unsigned char* d_imagePtr, unsigned char* d_i
 }
 
 
+__global__
+void ftTracingExtendKernel_warpShuffle_atomic(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_frontier_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr,
+	int width, int height, int slice, int newSize, int compact_size, int* d_frontier_compact_2, unsigned char* d_activeMat_compact)
+{
+	int tid = blockDim.x * blockIdx.x + threadIdx.x;
+
+	__shared__ int blockLength;
+	__shared__ int blockOffset;
+
+	int warp_id = threadIdx.x / 32;
+	int lane_id = threadIdx.x % 32;
+	int pointId = blockIdx.x * blockDim.x / 32 + warp_id;
+
+	if (pointId >= compact_size) return;
+
+	int smallIdx, fullIdx;
+	smallIdx = d_frontier_compact[pointId];
+	if (d_activeMat_compact[smallIdx] != ALIVE) return;
+
+
+	int curValue;
+	float curDist;
+
+	if (lane_id == 0)
+	{
+		smallIdx = d_frontier_compact[pointId];
+		curValue = d_imagePtr_compact[smallIdx];
+		curDist = d_distPtr[smallIdx];
+		fullIdx = d_decompress[smallIdx];
+	}
+
+	//Set initial value. The __shfl_sync function transmit(broadcast) values in the warp.
+	fullIdx = __shfl_sync(-1, fullIdx, 0);
+	curDist = __shfl_sync(-1, curDist, 0);
+	curValue = __shfl_sync(-1, curValue, 0);
+
+	int3 curPos;
+	curPos.z = fullIdx / (width * height);
+	curPos.y = fullIdx % (width * height) / width;
+	curPos.x = fullIdx % width;
+
+	int3 neighborPos;
+	int neighborIdx;
+	int neighborSmallIdx;
+	unsigned char neighborValue;
+
+	int k = lane_id;
+	int modified = 0;
+
+	if (k < 26)
+	{
+		neighborPos.x = curPos.x + dx3d26const[k];
+		neighborPos.y = curPos.y + dy3d26const[k];
+		neighborPos.z = curPos.z + dz3d26const[k];
+
+		if (neighborPos.x < 0 || neighborPos.x >= width || neighborPos.y < 0 || neighborPos.y >= height
+			|| neighborPos.z < 0 || neighborPos.z >= slice)
+			return;
+		neighborIdx = neighborPos.z * width * height + neighborPos.y * width + neighborPos.x;
+
+		neighborValue = d_imagePtr[neighborIdx];
+
+
+		neighborSmallIdx = d_compress[neighborIdx];
+		if (neighborSmallIdx == -1) return;
+
+		neighborValue = d_imagePtr_compact[neighborSmallIdx];
+		if (neighborValue == 0) return;
+
+		float EuclidDist = 1;
+		//EuclidDist = sqrtf(dx3d26const[k] * dx3d26const[k] + dy3d26const[k] * dy3d26const[k] + dz3d26const[k] * dz3d26const[k]);
+		//由于只有26个邻居，直接把对应的欧式距离存储起来了
+		////The distance of neighbors are stored at the constant memory.
+		EuclidDist = EuclidDistconst[k];
+		//两点之间的dist根据两点的欧式距离和亮度计算
+		//float deltaDist = gwdtFunc_gpu(EuclidDist, curValue, neighborValue);
+
+		if (neighborSmallIdx < 0)
+			printf("neighbor < 0!\n");
+
+		float deltaDist;
+		deltaDist = EuclidDist;
+
+
+
+
+		//在使用原子操作之前，进行一次快速检查。如果当前点连上阶段的邻居都更新不了，就放弃更新
+		//A fast check before atomic operations.
+		if (d_distPtr[neighborSmallIdx] - 1e-5 < curDist + deltaDist)
+			return;
+
+		float newDist = curDist + deltaDist;
+		//在dist的后面8个bit放入更新使用的方向k
+		newDist = __int_as_float(__float_as_int(newDist) & 0xFFFFFF00 | k);
+
+		//oldDist是atomicMin()返回的值，返回的是此次原子修改前的值,无论是否成功
+		int oldDist = atomicMin((int*)(d_updateDistPtr + neighborSmallIdx), __float_as_int(newDist));
+
+		//如果修改成功了
+		if (__int_as_float(oldDist) > newDist)
+		{
+			modified = 1;
+		}
+	}
+
+	int warpOffset;
+
+	if (modified)
+	{
+		//int pos = atomicAdd(&d_compact_size, 1);
+		//d_frontier_compact_2[pos] = neighborSmallIdx;
+
+		auto g = coalesced_threads();
+		int warp_res;
+		int rank = g.thread_rank();
+		if (rank == 0)
+			warp_res = atomicAdd(&d_compact_size, g.size());
+
+		warp_res = g.shfl(warp_res, 0);
+		int result = warp_res + rank;
+
+		d_frontier_compact_2[result] = neighborSmallIdx;
+	}
+}
+
+
+__global__
+void ftTracingUpdateKernel(int* d_compress, int* d_decompress, int* d_frontier_compact, float* d_distPtr, float* d_updateDistPtr, unsigned char* parentSimplePtr_compact, unsigned char* d_activeMat_compact,
+	int width, int height, int slice, int newSize, int compact_size)
+{
+	int tid = threadIdx.x + blockIdx.x*blockDim.x;
+	if (tid == 0)
+		d_compact_size = 0;
+	if (tid >= compact_size) return;
+
+	//smallIdx: The index in the compressed image.
+	//fullIdx: The index in the original image. 
+	//These indices can be transformed to each other by "d_compress" or "d_decompress" array.
+	int smallIdx = d_frontier_compact[tid];
+	int fullIdx = d_decompress[smallIdx];
+
+
+	//更新之前的direction
+	//direction: One of the 26-way neighbor. This value stores the parent information of nodes. 
+	int direction = parentSimplePtr_compact[smallIdx];
+	//更新之前的seed(就是属于哪个种子)
+	//In common, one element is extended from one seed.
+	int z = fullIdx / (width * height);
+	int y = fullIdx % (width * height) / width;
+	int x = fullIdx % width;
+
+	//更新之后(存储再updateDist中的) dist和direction
+	float newDist = d_updateDistPtr[smallIdx];
+	int directionUpdate = __float_as_int(newDist) & 0xFF;
+
+	//更新之后的parent(根据directionUpdate计算)
+	//The renewed parent
+	int newParent;
+	if (directionUpdate == 0xff)
+		newParent = -1;
+	else
+		newParent = (z - dz3d26const[directionUpdate]) * width * height + (y - dy3d26const[directionUpdate]) * width + (x - dx3d26const[directionUpdate]);
+	int newParentSmallIdx = d_compress[newParent];
+
+
+	d_distPtr[smallIdx] = newDist;
+	parentSimplePtr_compact[smallIdx] = directionUpdate;
+	d_activeMat_compact[smallIdx] = ALIVE;
+}
+
+
+__global__
+void copyDist2ImgKernel(unsigned char* d_imagePtr_compact, float* d_distPtr, int newSize)
+{
+	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
+	if (smallIdx >= newSize) return;
+	float dist = d_distPtr[smallIdx];
+	unsigned char result = 0;
+	if (dist >=0 && dist <= 255)
+		result = dist;
+	d_imagePtr_compact[smallIdx] = result;
+}
+
+
 void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize)
 {
 	cudaError_t errorCheck;
@@ -1151,8 +1172,8 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 	//The parent information are simplified to only one direction. The direction is from one of the 26-way neighbors.
 	//As for the direction is only a 8-bit value, it can be integrated into the 32-bit floating distance value.
 	unsigned char* d_parentSimplePtr;
-	cudaMalloc(&d_parentSimplePtr, sizeof(unsigned char) * newSize * 2);
-	cudaMemset(d_parentSimplePtr, 0xff, sizeof(unsigned char) * newSize * 2);
+	cudaMalloc(&d_parentSimplePtr, sizeof(unsigned char) * newSize);
+	cudaMemset(d_parentSimplePtr, 0xff, sizeof(unsigned char) * newSize);
 
 	//d_frontier_compact: 存储对锋面压缩后的结果，仅存储在锋面中的元素的下标
 	//thrust::device_vector<int>dv_frontier_compact(newSize);
@@ -1182,7 +1203,7 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 		system("pause");
 		return;
 	}
-	int compact_size = 0;
+	int compact_size = newSize;
 
 	int counter = 0;
 	int blockNum = (newSize - 1) / 512 + 1;
@@ -1207,7 +1228,7 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 
 	while (1)
 	{
-		//std::cerr << counter << std::endl;
+		//std::cerr << "Iter: " << counter << " frontier size: " << compact_size << std::endl;
 
 		//Switch the memory location of current tracing frontier and the next tracing frontier
 		if (ping_pong == 0)
@@ -1252,6 +1273,15 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 	errorCheck = cudaGetLastError();
 	if (errorCheck != cudaSuccess) {
 		std::cerr << "During changeSimpleParent " << cudaGetErrorString(errorCheck) << std::endl;
+		system("pause");
+		return;
+	}
+
+	copyDist2ImgKernel << < (newSize - 1) / 256 + 1, 256 >> > (d_imagePtr_compact, d_distPtr, newSize);
+	cudaDeviceSynchronize();
+	errorCheck = cudaGetLastError();
+	if (errorCheck != cudaSuccess) {
+		std::cerr << "During copyDist2Img " << cudaGetErrorString(errorCheck) << std::endl;
 		system("pause");
 		return;
 	}
@@ -1719,7 +1749,6 @@ __global__ void changeParentKernel_compact(int* d_compress, int* d_decompress, i
 	int x = fullIdx % width;
 
 	int parentfullIdx, parentSmallIdx;
-	int parent2fullIdx, parent2SmallIdx;
 
 	direction = d_parentSimplePtr[smallIdx];
 	if (direction != 0xff)
@@ -1727,13 +1756,6 @@ __global__ void changeParentKernel_compact(int* d_compress, int* d_decompress, i
 		parentfullIdx  = (z - dz3d26const[direction]) * width * height + (y - dy3d26const[direction]) * width + (x - dx3d26const[direction]);
 		parentSmallIdx = d_compress[parentfullIdx];
 		d_parentPtr_compact[smallIdx] = parentSmallIdx;
-	}
-	direction = d_parentSimplePtr[smallIdx + newSize];
-	if (direction != 0xff)
-	{
-		parent2fullIdx = (z - dz3d26const[direction]) * width * height + (y - dy3d26const[direction]) * width + (x - dx3d26const[direction]);
-		parent2SmallIdx = d_compress[parent2fullIdx];
-		d_parentPtr_compact[smallIdx + newSize] = parent2SmallIdx;
 	}
 }
 
@@ -2281,4 +2303,59 @@ __global__ void AddSkeletonKernel(unsigned char* d_imagePtr, unsigned char* d_sk
 void addSkeleton(unsigned char* d_imagePtr, unsigned char* d_skeletonPtr, int width, int height, int slice, int globalThreshold)
 {
 	AddSkeletonKernel << < (width * height * slice - 1) / 256 + 1, 256 >> > (d_imagePtr, d_skeletonPtr, width, height, slice, globalThreshold);
+}
+
+
+__global__
+void SetFtForBackgroundKernel(int* d_ftarr, int width, int height, int slice)
+{
+	int fullIdx = blockDim.x * blockIdx.x + threadIdx.x;
+	if (fullIdx >= width * height * slice) return;
+	d_ftarr[fullIdx] = fullIdx;
+}
+
+__global__
+void SetFtForForegroundKernel(int* d_decompress, int* d_ftarr, int* d_parentPtr_compact, int width, int height, int slice, int newSize)
+{
+	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
+	if (smallIdx >= newSize) return;
+	int parent = d_parentPtr_compact[smallIdx];
+	if (parent == 0xff) return; //如果已经是起点了，退出
+	while (d_parentPtr_compact[parent] != 0xff)
+	{
+		parent = d_parentPtr_compact[parent]; //不断找parent直到起点
+	}
+	int fullIdx = d_decompress[smallIdx];
+	int parentFullIdx = d_decompress[parent];
+	d_ftarr[fullIdx] = parentFullIdx;
+}
+
+void findFtPoints(int* d_decompress, int* d_ftarr, int* d_parentPtr_compact, int width, int height, int slice, int newSize)
+{
+	cudaError_t errorCheck;
+	TimerClock timer;
+	timer.update();
+	
+	SetFtForBackgroundKernel << < (width * height * slice - 1) / 256 + 1, 256 >> > (d_ftarr, width, height, slice);
+	cudaDeviceSynchronize();
+	errorCheck = cudaGetLastError();
+	if (errorCheck != cudaSuccess) {
+		std::cerr << "During SetFtForBackgroundKernel " << cudaGetErrorString(errorCheck) << std::endl;
+		system("pause");
+		return;
+	}
+	std::cerr << "SetFtForBackgroundKernel cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
+	
+	SetFtForForegroundKernel << < (newSize - 1) / 256 + 1, 256 >> > (d_decompress, d_ftarr, d_parentPtr_compact, width, height, slice, newSize);
+	cudaDeviceSynchronize();
+	errorCheck = cudaGetLastError();
+	if (errorCheck != cudaSuccess) {
+		std::cerr << "During SetFtForForegroundKernel " << cudaGetErrorString(errorCheck) << std::endl;
+		system("pause");
+		return;
+	}
+	std::cerr << "SetFtForForegroundKernel cost" << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
+
 }

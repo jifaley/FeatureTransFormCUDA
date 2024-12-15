@@ -61,6 +61,9 @@ int main(int argc, const char **argv)
 	std::cerr << "set globalThreshold cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
 
+	addDarkPadding(d_imagePtr, width, height, slice, globalThreshold);
+	std::cerr << "add darkpadding cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
 
 
 	int* d_compress; //Ñ¹ËõÓ³Éä¾ØÕó
@@ -71,7 +74,7 @@ int main(int argc, const char **argv)
 	compactImage(d_imagePtr, d_imagePtr_compact, d_compress, d_decompress, width, height, slice, newSize);
 
 	std::cerr << "OldSize: " << width * height * slice << " NewSize: " << newSize << std::endl;
-	printf("Compress Ratio: %.2lf%%\n", newSize *100/ (1.0 * width * height * slice));
+	printf("Compress Ratio: %.2lf%%\n", 100.0 * newSize / (1.0 * width * height * slice));
 
 	cudaDeviceSynchronize();
 	std::cerr << "compaction cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
@@ -88,18 +91,35 @@ int main(int argc, const char **argv)
 	cudaMalloc(&d_parentPtr_compact, sizeof(int) * newSize * 2);
 
 
+
+
 	unsigned char* d_activeMat_compact;
 	cudaMalloc(&d_activeMat_compact, sizeof(unsigned char) * newSize);
 
 
-	cudaMemset(d_parentPtr_compact, -1, sizeof(int) * newSize * 2);
+	cudaMemset(d_parentPtr_compact, -1, sizeof(int) * newSize);
 	cudaMemset(d_activeMat_compact, FARAWAY, sizeof(unsigned char) * newSize);
+
+	
 
 	featureTransForm(d_imagePtr, d_imagePtr_compact, d_compress, d_decompress, d_parentPtr_compact, d_activeMat_compact, width, height, slice, newSize);
 
 	cudaDeviceSynchronize();
 	std::cerr << "Feature Transform cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
+
+	recoverImage(d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
+
+	cudaMemcpy(h_imagePtr, d_imagePtr, sizeof(unsigned char) * width * height * slice, cudaMemcpyDeviceToHost);
+
+
+	int* d_ftarr;
+	cudaMalloc(&d_ftarr, sizeof(int) * width * height * slice);
+	
+
+	findFtPoints(d_decompress, d_ftarr, d_parentPtr_compact, width, height, slice, newSize);
+
+
 
 
 
@@ -114,6 +134,6 @@ int main(int argc, const char **argv)
 	cudaFree(d_decompress);
 	cudaFree(d_activeMat_compact);
 	cudaFree(d_parentPtr_compact);
-
+	cudaFree(d_ftarr);
 	return 0;
 }

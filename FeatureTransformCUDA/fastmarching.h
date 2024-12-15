@@ -51,3 +51,6 @@ void addSkeleton(unsigned char* d_imagePtr, unsigned char* d_skeletonPtr, int wi
 void ftChangeSimpleParentToFull(int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_parentSimplePtr, int width, int height, int slice, int newSize);
 
 void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize);
+
+
+void findFtPoints(int* d_decompress, int* d_ftarr, int* d_parentPtr_compact, int width, int height, int slice, int newSize);
