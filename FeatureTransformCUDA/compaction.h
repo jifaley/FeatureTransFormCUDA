@@ -2,7 +2,6 @@
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
 #include <iostream>
-#include "utils.h"
 
 #include <thrust/device_ptr.h>
 #include <thrust/execution_policy.h>

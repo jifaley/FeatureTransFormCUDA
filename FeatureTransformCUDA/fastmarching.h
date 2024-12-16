@@ -34,23 +34,11 @@ __constant__ const float EuclidDistconst[26] = {sq3, sq2, sq3, sq2, 1, sq2, sq3,
 };
 
 void addGreyWeightTransform(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int width, int height, int slice, int newSize);
-void buildInitNeuron(std::vector<int>& seedArr, unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, short int* d_seedNumberPtr, unsigned char* d_activeMat_compact, int* d_childNumMat, int width, int height, int slice, int newSize, unsigned char* d_radiusMat_compact);
-void calcRadius_gpu_compact(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, unsigned char* d_radiusMat_compact, int width, int height, int slice, int newSize, int globalThreshold);
-void calcRadius_gpu_fastmarching(unsigned char* imagePtr, unsigned char* d_imagePtr_comapct, int* d_compress, int* d_decompress, unsigned char* d_radiusMat_compact, int width, int height, int slice, int newSize);
-
-void changeSimpleParentToFull(int* d_compress, int* d_decompress, int* d_parentPtr, unsigned char* d_parentSimplePtr, std::vector<int>& seedArr, int width, int height, int slice, int newSize);
-
-
-void addSimpleDistanceTransform(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, unsigned char* d_transformedPtr_compact, int* d_compress, int* d_decompress, int width, int height, int slice, int newSize);
-
-void skeletonize(unsigned char* d_imagePtr_compact, unsigned char* d_skeletonPtr_compact, int* d_compress, int* d_decompress, int width, int  height, int slice, int newSize);
-
-void addSkeleton(unsigned char* d_imagePtr, unsigned char* d_skeletonPtr, int width, int height, int slice, int globalThreshold);
 
 
 void ftChangeSimpleParentToFull(int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_parentSimplePtr, int width, int height, int slice, int newSize);
 
-void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize);
+void featureTransForm(unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize);
 
 
 void findFtPoints(int* d_decompress, int* d_ftarr, int* d_parentPtr_compact, int width, int height, int slice, int newSize);

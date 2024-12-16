@@ -280,7 +280,7 @@ __device__ int d_compact_size;
 //预处理：把所有临近0的像素作为起始点，他们距离背景的距离即为他们的像素值
 //Preprocessing. Putting all of the voxels who have a background voxel as neighbor into the starting frontier.
 //The intital distance value is set as their voxel intensity.
-__global__ void ftPreProcessKernel(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr, int* d_frontier_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize)
+__global__ void ftPreProcessKernel(unsigned char* d_imagePtr_compact, float* d_distPtr, float* d_updateDistPtr, int* d_frontier_compact, unsigned char* d_activeMat_compact, int newSize)
 {
 	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
 	if (smallIdx >= newSize) return;
@@ -290,44 +290,23 @@ __global__ void ftPreProcessKernel(unsigned char* d_imagePtr, unsigned char* d_i
 	unsigned char curValue;
 
 	curValue = d_imagePtr_compact[smallIdx];
-	int fullIdx = d_decompress[smallIdx];
 	int neighborIdx;
 
-	curPos.z = fullIdx / (width * height);
-	curPos.y = fullIdx % (width * height) / width;
-	curPos.x = fullIdx % width;
-
-
-	for (int k = 0; k < 6; k++)
+	if (curValue == 1)
 	{
-		neighborPos.x = curPos.x + dx3dconst[k];
-		neighborPos.y = curPos.y + dy3dconst[k];
-		neighborPos.z = curPos.z + dz3dconst[k];
-		if (neighborPos.x < 0 || neighborPos.x >= width || neighborPos.y < 0 || neighborPos.y >= height
-			|| neighborPos.z < 0 || neighborPos.z >= slice)
-			continue;
-		neighborIdx = neighborPos.z * width * height + neighborPos.y * width + neighborPos.x;
-
-		neighborValue = d_imagePtr[neighborIdx];
-
-		if (neighborValue == 0)
-		{
-			d_distPtr[smallIdx] = 1;
-			d_updateDistPtr[smallIdx] = 1;
-			//上面说的是distance = 1，下面说的是在frontier中
+		d_distPtr[smallIdx] = 1;
+		d_updateDistPtr[smallIdx] = 1;
+		//上面说的是distance = 1，下面说的是在frontier中
 
 
-			d_activeMat_compact[smallIdx] = ALIVE;
-			d_frontier_compact[smallIdx] = smallIdx;
-
-			break;
-		}
+		d_activeMat_compact[smallIdx] = ALIVE;
+		d_frontier_compact[smallIdx] = smallIdx;
 	}
 }
 
 
 __global__
-void ftTracingExtendKernel_warpShuffle_atomic(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_frontier_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr,
+void ftTracingExtendKernel_warpShuffle_atomic(unsigned char* d_imagePtr_compact, int* d_frontier_compact, int* d_compress, int* d_decompress, float* d_distPtr, float* d_updateDistPtr,
 	int width, int height, int slice, int newSize, int compact_size, int* d_frontier_compact_2, unsigned char* d_activeMat_compact)
 {
 	int tid = blockDim.x * blockIdx.x + threadIdx.x;
@@ -385,9 +364,6 @@ void ftTracingExtendKernel_warpShuffle_atomic(unsigned char* d_imagePtr, unsigne
 			|| neighborPos.z < 0 || neighborPos.z >= slice)
 			return;
 		neighborIdx = neighborPos.z * width * height + neighborPos.y * width + neighborPos.x;
-
-		neighborValue = d_imagePtr[neighborIdx];
-
 
 		neighborSmallIdx = d_compress[neighborIdx];
 		if (neighborSmallIdx == -1) return;
@@ -510,7 +486,7 @@ void copyDist2ImgKernel(unsigned char* d_imagePtr_compact, float* d_distPtr, int
 }
 
 //featureTransform:输入原图，将结果
-void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize)
+void featureTransForm(unsigned char* d_imagePtr_compact, int* d_compress, int* d_decompress, int* d_parentPtr_compact, unsigned char* d_activeMat_compact, int width, int height, int slice, int newSize)
 {
 	cudaError_t errorCheck;
 
@@ -552,7 +528,7 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 		return;
 	}
 
-	ftPreProcessKernel << < (newSize - 1) / 256 + 1, 256 >> > (d_imagePtr, d_imagePtr_compact, d_compress, d_decompress, d_distPtr, d_updateDistPtr, d_frontier_compact, d_activeMat_compact, width, height, slice, newSize);
+	ftPreProcessKernel << < (newSize - 1) / 256 + 1, 256 >> > (d_imagePtr_compact, d_distPtr, d_updateDistPtr, d_frontier_compact, d_activeMat_compact, newSize);
 
 
 	cudaDeviceSynchronize();
@@ -599,7 +575,7 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 			f1 = d_frontier_compact2; f2 = d_frontier_compact;
 		}
 
-		ftTracingExtendKernel_warpShuffle_atomic << <(compact_size - 1) / 32 + 1, 1024 >> > (d_imagePtr, d_imagePtr_compact, f1, d_compress, d_decompress, d_distPtr, d_updateDistPtr,
+		ftTracingExtendKernel_warpShuffle_atomic << <(compact_size - 1) / 32 + 1, 1024 >> >  (d_imagePtr_compact, f1, d_compress, d_decompress, d_distPtr, d_updateDistPtr,
 			width, height, slice, newSize, compact_size, f2, d_activeMat_compact);
 
 
