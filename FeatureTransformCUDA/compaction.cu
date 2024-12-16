@@ -101,115 +101,6 @@ void compactImage(unsigned char* d_imagePtr, unsigned char* &d_imagePtr_compact,
 	//整体运算，包括copy_if 和getMap()，实际耗时约20ms，但被上面50ms的同步严重拖累。
 }
 
-struct isValid_functor {
-
-	const unsigned char threshold;
-
-	isValid_functor(unsigned char _th) : threshold(_th) {}
-	__host__ __device__
-		bool operator()(const unsigned char& x) const
-	{
-		return x >= threshold;
-	}
-};
-
-
-//功能：计算d_sequence数组中元素的x,y,z坐标平均值，然后找到距离平均值最近的元素。
-//Work：Calculating the average of x,y,z coordinates in the d_sequence array，and find the element nearest to this average coordinate.
-__global__
-void centerProcess(int* d_sequence, int* d_decompress, int maxSeedNum, int width, int height, int slice)
-{
-	__shared__ int sumX, sumY, sumZ;
-	__shared__ int minDist;
-	__shared__ int minPos;
-
-
-	int tid = threadIdx.x;
-	if (tid >= maxSeedNum) return;
-
-	int smallIdx = d_sequence[tid];
-	int fullIdx = d_decompress[smallIdx];
-
-	int z = fullIdx / (width * height);
-	int y = fullIdx % (width * height) / width;
-	int x = fullIdx % width;
-
-	atomicAdd(&sumZ, z);
-	atomicAdd(&sumY, y);
-	atomicAdd(&sumX, x);
-
-	__syncthreads();
-
-	if (tid == 0)
-	{
-		sumX = sumX / maxSeedNum;
-		sumY = sumY / maxSeedNum;
-		sumZ = sumZ / maxSeedNum;
-		minDist = 2147483647;
-		d_sequence[0] = 2147483647;
-	}
-
-	__syncthreads();
-
-	int dist = sqrtf((sumZ - z) * (sumZ - z) + (sumY - y) * (sumY - y) + (sumX - x) * (sumX - x));
-
-	atomicMin(&minDist, dist);
-
-	__syncthreads();
-
-	if (minDist == dist)
-	{
-		atomicMin(&d_sequence[0], fullIdx);
-	}
-}
-
-/*
-函数：getCenterPos
-功能：寻找Radius最大的点，作为胞体(soma)
-输出：maxPos(胞体的位置)，maxRadius(最大半径)
-思路：如果只找半径最大的点，可能会有很多相同的取值，容易偏斜；
-因此，我们将周围半径足够大的若干点的位置计算平均值，作为新的胞体中心。
-实现：使用thrust库的copy_if 或者 remove_if 操作
-*/
-/*
-Function：getCenterPos
-Work：Find the point with the largest radius, as the center of neuron soma.
-Output：maxPos(the location of soma)，maxRadius(the largest radius)
-Implementation：The element with the largest radius may not locates at the neuron center.
-We generate a lot of candidates with large radius, and calculate the center of them as the neuron center.
-*/
-void getCenterPos(int* d_compress, int* d_decompress, unsigned char* d_radiusMat_compact, int width, int height, int slice, int newSize, int&maxPos, int& maxRadius)
-{
-	thrust::device_ptr<unsigned char> d_ptr(d_radiusMat_compact);
-	thrust::device_ptr<unsigned char> iter = thrust::max_element(d_ptr, d_ptr + newSize);
-	maxRadius = *iter;
-	//首先通过max_element计算出最大半径的值
-	//Find the largest radius
-
-	printf("Init maxRadius: %d\n", maxRadius);
-	
-	int* d_sequence;
-	cudaMalloc(&d_sequence, sizeof(int) * newSize);
-
-	//我们将最大半径的4/5或者最大半径-5作为阈值，选出一些候选点；将这些候选点的中心作为胞体中心。
-	//The threshold radius for generating center candidates
-	unsigned char thresholdRadius = MAX(maxRadius * 4 / 5, maxRadius - 5);
-
-	int* d_copy_end = thrust::copy_if(thrust::device, thrust::make_counting_iterator<int>(0), thrust::make_counting_iterator<int>(newSize), d_radiusMat_compact, d_sequence,isValid_functor(thresholdRadius));
-	int maxSeedNum = d_copy_end - d_sequence;
-
-	maxSeedNum = MIN(maxSeedNum, 512);
-
-	//计算d_sequence数组中元素的x,y,z坐标平均值，然后找到距离平均值最近的元素。
-	centerProcess << <1, maxSeedNum >> > (d_sequence, d_decompress, maxSeedNum, width, height, slice);
-
-	thrust::device_ptr<int> dp(d_sequence);
-
-	maxPos = *dp;
-	cudaFree(d_sequence);
-}
-
-
 
 __global__ void recoverKernel(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_decompress, int newSize)
 {
@@ -221,6 +112,7 @@ __global__ void recoverKernel(unsigned char* d_imagePtr, unsigned char* d_imageP
 	d_imagePtr[fullIdx] = d_imagePtr_compact[smallIdx];
 }
 
+//recoverImage:将压缩数组内容恢复到原始数组
 void recoverImage(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_decompress, int newSize)
 {
 	assert(d_imagePtr != nullptr);
@@ -232,65 +124,3 @@ void recoverImage(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, 
 }
 
 
-
-__global__ void compressKernel(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_decompress, int newSize)
-{
-	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
-	if (smallIdx >= newSize) return;
-
-	int fullIdx = d_decompress[smallIdx];
-
-	d_imagePtr_compact[smallIdx] = d_imagePtr[fullIdx];
-}
-
-void compressImage(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compact, int* d_decompress, int newSize)
-{
-	assert(d_imagePtr != nullptr);
-	assert(d_imagePtr_compact != nullptr);
-	assert(d_decompress != nullptr);
-	assert(newSize != 0);
-
-	compressKernel << <(newSize - 1) / 256 + 1, 256 >> > (d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
-}
-
-
-__global__ void compressKernel_int(int* d_imagePtr, int* d_imagePtr_compact, int* d_decompress, int newSize)
-{
-	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
-	if (smallIdx >= newSize) return;
-
-	int fullIdx = d_decompress[smallIdx];
-
-	d_imagePtr_compact[smallIdx] = d_imagePtr[fullIdx];
-}
-
-void compressImage_int(int* d_imagePtr, int* d_imagePtr_compact, int* d_decompress, int newSize)
-{
-	assert(d_imagePtr != nullptr);
-	assert(d_imagePtr_compact != nullptr);
-	assert(d_decompress != nullptr);
-	assert(newSize != 0);
-
-	compressKernel_int << <(newSize - 1) / 256 + 1, 256 >> > (d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
-}
-
-
-__global__ void compressKernel_short(short int* d_imagePtr, short int* d_imagePtr_compact, int* d_decompress, int newSize)
-{
-	int smallIdx = blockDim.x * blockIdx.x + threadIdx.x;
-	if (smallIdx >= newSize) return;
-
-	int fullIdx = d_decompress[smallIdx];
-
-	d_imagePtr_compact[smallIdx] = d_imagePtr[fullIdx];
-}
-
-void compressImage_short(short int* d_imagePtr, short int* d_imagePtr_compact, int* d_decompress, int newSize)
-{
-	assert(d_imagePtr != nullptr);
-	assert(d_imagePtr_compact != nullptr);
-	assert(d_decompress != nullptr);
-	assert(newSize != 0);
-
-	compressKernel_short << <(newSize - 1) / 256 + 1, 256 >> > (d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
-}

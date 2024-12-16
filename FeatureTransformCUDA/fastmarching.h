@@ -54,3 +54,7 @@ void featureTransForm(unsigned char* d_imagePtr, unsigned char* d_imagePtr_compa
 
 
 void findFtPoints(int* d_decompress, int* d_ftarr, int* d_parentPtr_compact, int width, int height, int slice, int newSize);
+
+void findFtPointsHost(int* h_decompress, int* h_ftarr, int* h_parentPtr_compact, int width, int height, int slice, int newSize);
+
+void convertFtPoints2Dist(int* h_ftarr, unsigned char* h_distPtr, int width, int height, int slice);

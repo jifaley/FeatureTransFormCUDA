@@ -15,6 +15,8 @@
 #include <device_launch_parameters.h>
 
 
+
+
 int main(int argc, const char **argv)
 {
 	int i;
@@ -89,10 +91,6 @@ int main(int argc, const char **argv)
 	
 	int* d_parentPtr_compact;
 	cudaMalloc(&d_parentPtr_compact, sizeof(int) * newSize * 2);
-
-
-
-
 	unsigned char* d_activeMat_compact;
 	cudaMalloc(&d_activeMat_compact, sizeof(unsigned char) * newSize);
 
@@ -113,19 +111,39 @@ int main(int argc, const char **argv)
 	cudaMemcpy(h_imagePtr, d_imagePtr, sizeof(unsigned char) * width * height * slice, cudaMemcpyDeviceToHost);
 
 
+
+
+
 	int* d_ftarr;
 	cudaMalloc(&d_ftarr, sizeof(int) * width * height * slice);
-	
-
 	findFtPoints(d_decompress, d_ftarr, d_parentPtr_compact, width, height, slice, newSize);
+	
+	int* h_ftarr = (int*)malloc(sizeof(int) * width * height * slice);
+	cudaMemcpy(h_ftarr, d_ftarr, sizeof(int) * width * height * slice, cudaMemcpyDeviceToHost);
+	
+	unsigned char* h_distPtr = (unsigned char*)malloc(sizeof(unsigned char) * width * height * slice);
+	convertFtPoints2Dist(h_ftarr, h_distPtr, width, height, slice);
 
 
 
+	//findFtPointsHost(h_decompress, h_ftarr, h_parentPtr_compact, width, height, slice, newSize);
+
+
+	//free(h_parentPtr_compact);
+	//free(h_decompress);
+	
 
 
 	std::string outputFile = "output.tif";
 
+	std::string reconstructedOutputFile = "rec_output.tif";
+
 	saveTiff(outputFile.c_str(), h_imagePtr, size);
+
+	saveTiff(reconstructedOutputFile.c_str(), h_distPtr, size);
+
+	free(h_distPtr);
+	free(h_ftarr);
 
 	free(h_imagePtr);
 	cudaFree(d_imagePtr);
