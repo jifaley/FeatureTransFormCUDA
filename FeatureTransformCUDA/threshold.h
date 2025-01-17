@@ -14,6 +14,8 @@
 */
 void addGlobalThreshold(unsigned char* d_imagePtr, int width, int height, int slice, unsigned char threshold);
 
+void addMaxMinGlobalThreshold(unsigned char* d_imagePtr, int width, int height, int slice, unsigned char threshold);
+
 /*
 函数：addDarkPadding
 功能：给d_imagePtr 指向的图像进行补充

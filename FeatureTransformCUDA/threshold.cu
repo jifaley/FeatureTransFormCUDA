@@ -95,6 +95,14 @@ void addGlobalThreshold(unsigned char* d_imagePtr, int width, int height, int sl
 	thrust::replace_if(thrust::device, d_imagePtr, d_imagePtr + width * height * slice, d_imagePtr, comp, 0);
 }
 
+void addMaxMinGlobalThreshold(unsigned char* d_imagePtr, int width, int height, int slice, unsigned char threshold)
+{
+	is_less_than_th comp(threshold);
+	thrust::replace_if(thrust::device, d_imagePtr, d_imagePtr + width * height * slice, d_imagePtr, comp, 0);
+
+	is_greater_than_th comp2(1);
+	thrust::replace_if(thrust::device, d_imagePtr, d_imagePtr + width * height * slice, d_imagePtr, comp2, 1);
+}
 
 
 

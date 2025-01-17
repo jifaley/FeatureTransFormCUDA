@@ -29,7 +29,8 @@ unsigned char* loadImage(const std::string inputName, int* imageShape)
 
 	for (int s = 0; s < nTotalFrame; s++) {
 		for (int i = 0; i < height; i++) {
-			TIFFReadScanline(tif, buffer + s * width * height + (height - 1 - i) * width, i);
+			//TIFFReadScanline(tif, buffer + s * width * height + (height - 1 - i) * width, i);
+			TIFFReadScanline(tif, buffer + s * width * height + i * width, i);
 		}
 		TIFFReadDirectory(tif);  // Move to the next frame  
 	}

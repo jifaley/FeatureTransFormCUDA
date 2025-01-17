@@ -1,4 +1,4 @@
-#include <iostream>
+ï»¿#include <iostream>
 #include <string>
 
 #include <stdio.h>
@@ -10,11 +10,146 @@
 #include "compaction.h"
 #include "fastmarching.h"
 #include "threshold.h"
+#include "image.h"
+#include "volume.h"
+#include <algorithm>
 
 #include <cuda_runtime.h> 
 #include <device_launch_parameters.h>
 
+const int GAMMA = 1;
+const int FOREGROUND = 1;
+const int BACKGROUND = 0;
+const int SKEL = 255;
 
+#define sqr(x) ((x)*(x))
+#define sqrlength(i, j, k) ((i)*(i)+(j)*(j)+(k)*(k))
+
+static int			gamma_val = GAMMA;
+static IntVolume*	ft, *ft_test;
+static ByteVolume*	indata, *indata_test;
+static char			input_file[MAXSTR];
+static char			output_file[MAXSTR];
+static char*		basefilename;
+static char			basename[MAXSTR];
+static char			skel_file[MAXSTR];
+
+void CDT2MAT(BYTE* skel, BYTE* dis, int xdim, int ydim, int zdim)
+{
+	int counter = 0;
+	for (int z = 1; z < zdim; z++) {
+		for (int y = 1; y < ydim; y++) {
+			for (int x = 1; x < xdim; x++) {
+				int left = dis[x - 1 + y * xdim + z * xdim * ydim];
+				int top = dis[x + (y - 1) * xdim + z * xdim * ydim];
+				int front = dis[x + y * xdim + (z - 1) * xdim * ydim];
+				int left_top = dis[x - 1 + (y - 1) * xdim + z * xdim * ydim];
+				int left_front = dis[x - 1 + y * xdim + (z - 1) * xdim * ydim];
+				int top_front = dis[x + (y - 1) * xdim + (z - 1) * xdim * ydim];
+				int now = dis[x + y * xdim + z * xdim * ydim];
+				if (max(max(left_top, max(top_front, left_front)), max(left, max(top, front))) > now)
+				{
+					skel[x + y * xdim + z * xdim * ydim] = SKEL;
+					counter++;
+				}
+					
+			}
+		}
+	}
+	std::cerr << "SKEL counter: " << counter << std::endl;
+}
+
+__global__ void processArrayKernel(unsigned char* data, int size, int FOREGROUND, int SKEL) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+	if (idx < size) {
+		if (data[idx] == FOREGROUND) {
+			data[idx] = 0;
+		}
+		if (data[idx] == SKEL) {
+			data[idx] = 1;
+		}
+	}
+}
+
+void finalProcess(ByteVolume* indata, int allsize) {
+	unsigned char* d_indata;
+
+	cudaMalloc(&d_indata, allsize * sizeof(unsigned char));
+	cudaMemcpy(d_indata, indata->data, allsize * sizeof(unsigned char), cudaMemcpyHostToDevice);
+
+	int blockSize = 256;
+	int numBlocks = (allsize + blockSize - 1) / blockSize;
+
+	processArrayKernel << <numBlocks, blockSize >> > (d_indata, allsize, FOREGROUND, SKEL);
+
+	cudaMemcpy(indata->data, d_indata, allsize * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+	cudaFree(d_indata);
+}
+
+void finalProcessRaw(unsigned char* indata_arr, int allsize) {
+	unsigned char* d_indata;
+
+	cudaMalloc(&d_indata, allsize * sizeof(unsigned char));
+	cudaMemcpy(d_indata, indata_arr, allsize * sizeof(unsigned char), cudaMemcpyHostToDevice);
+
+	int blockSize = 256;
+	int numBlocks = (allsize + blockSize - 1) / blockSize;
+
+	processArrayKernel << <numBlocks, blockSize >> > (d_indata, allsize, FOREGROUND, SKEL);
+
+	cudaMemcpy(indata_arr, d_indata, allsize * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+	cudaFree(d_indata);
+}
+
+__global__ void modifyArray(unsigned char* data, int size, unsigned char* maxVal, int globalTh) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (idx < size) {
+		if (data[idx] < globalTh) {
+			data[idx] = 0;
+		}
+		atomicMax((int*)maxVal, (int)data[idx]);
+	}
+}
+
+__global__ void limitMaxValue(unsigned char* data, int size, int FOREGROUND) {
+	int idx = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (idx < size) {
+		if (data[idx] > FOREGROUND) {
+			data[idx] = FOREGROUND;
+		}
+	}
+}
+
+
+void dealWithInput(unsigned char* h_inputImagePtr, int allsize, int max) {
+
+	int globalTh = 2;
+	unsigned char* d_data;
+	unsigned char* d_maxVal;
+
+	cudaMalloc(&d_data, allsize * sizeof(unsigned char));
+	cudaMalloc(&d_maxVal, sizeof(unsigned char));
+
+	cudaMemcpy(d_data, h_inputImagePtr, allsize * sizeof(unsigned char), cudaMemcpyHostToDevice);
+	cudaMemcpy(d_maxVal, &max, sizeof(unsigned char), cudaMemcpyHostToDevice);
+
+	int blockSize = 256;
+	int numBlocks = (allsize + blockSize - 1) / blockSize;
+	modifyArray << <numBlocks, blockSize >> > (d_data, allsize, d_maxVal, globalTh);
+
+	cudaMemcpy(&max, d_maxVal, sizeof(unsigned char), cudaMemcpyDeviceToHost);
+
+	if (max > 1) {
+		limitMaxValue << <numBlocks, blockSize >> > (d_data, allsize, FOREGROUND);
+	}
+
+	cudaMemcpy(h_inputImagePtr, d_data, allsize * sizeof(unsigned char), cudaMemcpyDeviceToHost);
+
+	cudaFree(d_data);
+	cudaFree(d_maxVal);
+}
 
 
 int main(int argc, const char **argv)
@@ -33,7 +168,7 @@ int main(int argc, const char **argv)
 	std::cerr << "Usage: inputname threshold" << std::endl;
 
 	std::string input_file;
-	int globalThreshold = 5;
+	int globalThreshold = 3;
 
 	if (argc > 1)
 		input_file = argv[1];
@@ -50,6 +185,9 @@ int main(int argc, const char **argv)
 	int height = size[1];
 	int slice = size[2];
 
+
+
+
 	unsigned char* d_imagePtr = nullptr;
 	cudaMalloc(&d_imagePtr, sizeof(unsigned char) * width * height * slice);
 	cudaMemcpy(d_imagePtr, h_imagePtr, sizeof(unsigned char) * width * height * slice, cudaMemcpyHostToDevice);
@@ -58,23 +196,31 @@ int main(int argc, const char **argv)
 	std::cerr << "Load cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
 
+	unsigned char imageMaxValue;
+	//dealWithInput(h_imagePtr, width * height * slice, imageMaxValue);
+	std::cerr << "imageMaxValue: " << (int)imageMaxValue << std::endl;
 	
-	//Ìí¼ÓÈ«¾ÖãÐÖµ
+	cudaDeviceSynchronize();
+	std::cerr << "dealwithInput cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
+
+	
+	//æ·»åŠ å…¨å±€é˜ˆå€¼
 	addGlobalThreshold(d_imagePtr, width, height, slice, globalThreshold);
 
 	std::cerr << "set globalThreshold cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
 
-	//½«Ô­Í¼ÖÐ½ô¿¿Ç°¾°µãµÄ±³¾°µã¸³ÖµÎª1£¬×÷ÎªÖ®ºóµÄÀ©Õ¹Æðµã
+	//å°†åŽŸå›¾ä¸­ç´§é å‰æ™¯ç‚¹çš„èƒŒæ™¯ç‚¹èµ‹å€¼ä¸º1ï¼Œä½œä¸ºä¹‹åŽçš„æ‰©å±•èµ·ç‚¹
 	addDarkPadding(d_imagePtr, width, height, slice, globalThreshold);
 	std::cerr << "add darkpadding cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
 
 
-	int* d_compress; //Ñ¹ËõÓ³Éä¾ØÕó
-	int* d_decompress; //½âÑ¹ËõÓ³Éä¾ØÕó
-	unsigned char* d_imagePtr_compact; //Ñ¹ËõºóÔ­Í¼
-	int newSize; //Ñ¹ËõºóÊý×é×Ü´óÐ¡
+	int* d_compress; //åŽ‹ç¼©æ˜ å°„çŸ©é˜µ
+	int* d_decompress; //è§£åŽ‹ç¼©æ˜ å°„çŸ©é˜µ
+	unsigned char* d_imagePtr_compact; //åŽ‹ç¼©åŽåŽŸå›¾
+	int newSize; //åŽ‹ç¼©åŽæ•°ç»„æ€»å¤§å°
 	
 	compactImage(d_imagePtr, d_imagePtr_compact, d_compress, d_decompress, width, height, slice, newSize);
 
@@ -86,97 +232,151 @@ int main(int argc, const char **argv)
 	timer.update();
 
 
-	////////////////////ÒÔÉÏÎªÊäÈë
+	////////////////////ä»¥ä¸Šä¸ºè¾“å…¥
 
 
 	
-	//²âÊÔ1: Ö±½Ó½«Ô­Í¼±ä»»Îª¾àÀëÖµ£¬µ÷ÓÃaddGreyWeightTransform() º¯Êý ½«d_imagePtr_compact ±äÎª¾àÀë±ä»»Ö®ºóµÄÊý×é
+	//æµ‹è¯•1: ç›´æŽ¥å°†åŽŸå›¾å˜æ¢ä¸ºè·ç¦»å€¼ï¼Œè°ƒç”¨addGreyWeightTransform() å‡½æ•° å°†d_imagePtr_compact å˜ä¸ºè·ç¦»å˜æ¢ä¹‹åŽçš„æ•°ç»„
 	
-	//addGreyWeightTransform(d_imagePtr, d_imagePtr_compact, d_compress, d_decompress, width, height, slice, newSize);
-	//cudaDeviceSynchronize();
-	//std::cerr << "GreyWeight Transform cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
-	//timer.update();
-
-	//µ÷ÓÃrecoverImage() ½«d_imagePtr_compactÖÐµÄÊý¾Ý½âÑ¹Ëõµ½Ô­Í¼d_imagePtrÖÐ
-	//recoverImage(d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
-
-
-
-	/////////////²âÊÔ1Íê±Ï
-
-
-	///////////²âÊÔ2£ºÔÚ±ä»»¾àÀëÖµµÄ¹ý³ÌÖÐÍ¬Ê±´æ´¢À©Õ¹µÄ¸¸Ç×ÐÅÏ¢£¬Ö±µ½ÕÒµ½Ã¿¸öµã¾àÀë×î½üµÄ±³¾°µã×ø±ê´æ´¢ÔÚftÊý×éÖÐ
-	
-	int* d_parentPtr_compact;
-	unsigned char* d_activeMat_compact;
-	cudaMalloc(&d_parentPtr_compact, sizeof(int) * newSize * 2);
-	cudaMalloc(&d_activeMat_compact, sizeof(unsigned char) * newSize);
-	cudaMemset(d_parentPtr_compact, -1, sizeof(int) * newSize);
-	cudaMemset(d_activeMat_compact, FARAWAY, sizeof(unsigned char) * newSize);
-
-	
-	//ÊäÈë£ºÔ­Í¼d_imagePtr_compact£¬½«Ô­Í¼ÐÞ¸ÄÎª¾àÀëÖµ£¬²¢ÇÒ¶îÍâ¼ÆËãd_parentPtr_compact£¬¼´À©Õ¹µÄ¸¸Ç×½ÚµãÐÅÏ¢
-	featureTransForm(d_imagePtr_compact, d_compress, d_decompress, d_parentPtr_compact, d_activeMat_compact, width, height, slice, newSize);
-
+	addGreyWeightTransform(d_imagePtr, d_imagePtr_compact, d_compress, d_decompress, width, height, slice, newSize);
 	cudaDeviceSynchronize();
-	std::cerr << "Feature Transform cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	std::cerr << "GreyWeight Transform cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
+	
 
-	//µ÷ÓÃrecoverImage() ½«d_imagePtr_compactÖÐµÄÊý¾Ý½âÑ¹Ëõµ½Ô­Í¼d_imagePtrÖÐ
+	//è°ƒç”¨recoverImage() å°†d_imagePtr_compactä¸­çš„æ•°æ®è§£åŽ‹ç¼©åˆ°åŽŸå›¾d_imagePträ¸­
 	recoverImage(d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
 
 	cudaDeviceSynchronize();
 	std::cerr << "RecoverImage cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
 	timer.update();
+
+
+
+
+
+
+	/////////////æµ‹è¯•1å®Œæ¯•
+
+
+	/////////////æµ‹è¯•2ï¼šåœ¨å˜æ¢è·ç¦»å€¼çš„è¿‡ç¨‹ä¸­åŒæ—¶å­˜å‚¨æ‰©å±•çš„çˆ¶äº²ä¿¡æ¯ï¼Œç›´åˆ°æ‰¾åˆ°æ¯ä¸ªç‚¹è·ç¦»æœ€è¿‘çš„èƒŒæ™¯ç‚¹åæ ‡å­˜å‚¨åœ¨ftæ•°ç»„ä¸­
+	//
+	//int* d_parentPtr_compact;
+	//unsigned char* d_activeMat_compact;
+	//cudaMalloc(&d_parentPtr_compact, sizeof(int) * newSize * 2);
+	//cudaMalloc(&d_activeMat_compact, sizeof(unsigned char) * newSize);
+	//cudaMemset(d_parentPtr_compact, -1, sizeof(int) * newSize);
+	//cudaMemset(d_activeMat_compact, FARAWAY, sizeof(unsigned char) * newSize);
+
+	//
+	////è¾“å…¥ï¼šåŽŸå›¾d_imagePtr_compactï¼Œå°†åŽŸå›¾ä¿®æ”¹ä¸ºè·ç¦»å€¼ï¼Œå¹¶ä¸”é¢å¤–è®¡ç®—d_parentPtr_compactï¼Œå³æ‰©å±•çš„çˆ¶äº²èŠ‚ç‚¹ä¿¡æ¯
+	//featureTransForm(d_imagePtr_compact, d_compress, d_decompress, d_parentPtr_compact, d_activeMat_compact, width, height, slice, newSize);
+
+	//cudaDeviceSynchronize();
+	//std::cerr << "Feature Transform cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	//timer.update();
+
+	////è°ƒç”¨recoverImage() å°†d_imagePtr_compactä¸­çš„æ•°æ®è§£åŽ‹ç¼©åˆ°åŽŸå›¾d_imagePträ¸­
+	//recoverImage(d_imagePtr, d_imagePtr_compact, d_decompress, newSize);
+
+	//cudaDeviceSynchronize();
+	//std::cerr << "RecoverImage cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	//timer.update();
+	//
+	//
+	//int* d_ftarr;
+	//cudaMalloc(&d_ftarr, sizeof(int) * width * height * slice);
+
+	////ftarræ•°ç»„å³ä¸ºIMA3D è¦æ±‚çš„ï¼Œè·ç¦»æœ€è¿‘èƒŒæ™¯ç‚¹çš„ä½ç½®ã€‚æ ¹æ®ä¹‹å‰è®¡ç®—çš„parentä¿¡æ¯å€’ç€è·Ÿè¸ªè®¡ç®—å¾—åˆ°
+	//findFtPoints(d_decompress, d_ftarr, d_parentPtr_compact, width, height, slice, newSize);
+
+	//cudaDeviceSynchronize();
+	//std::cerr << "findFtPoints cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	//timer.update();
+
+	//int* h_ftarr = (int*)malloc(sizeof(int) * width * height * slice);
+	//cudaMemcpy(h_ftarr, d_ftarr, sizeof(int) * width * height * slice, cudaMemcpyDeviceToHost);
+
+	//unsigned char* h_imagePtr_cpy = loadImage(input_file, size);
+	//int count = 0;
+	//int count_dif = 0;
+	//for (int i = 0; i < width * height * slice; ++i) {
+	//	if ((int)h_imagePtr_cpy[i] != 0) {
+	//		count++;
+	//		if (h_ftarr[i] == i)
+	//			count_dif++;
+	//	}
+	//}
+
+	//cout << count << endl;
+	//cout << count_dif << endl;
+
+	//////éªŒè¯ï¼šä½¿ç”¨ftarrä¸­çš„ä½ç½®é‡æ–°è®¡ç®—è·ç¦»å€¼ï¼Œå­˜å‚¨åœ¨é‡å»ºæ•°ç»„h_distPträ¸­
+	//unsigned char* h_recDistPtr = (unsigned char*)malloc(sizeof(unsigned char) * width * height * slice);
+	//convertFtPoints2Dist(h_ftarr, h_recDistPtr, width, height, slice);
+	//
+	////æœ‰éœ€è¦å¯ä»¥è°ƒç”¨hostç‰ˆæœ¬çš„findFtPoint
+	////findFtPointsHost(h_decompress, h_ftarr, h_parentPtr_compact, width, height, slice, newSize);
+	////free(h_parentPtr_compact);
+	////free(h_decompress);
+
 	
-	
-	int* d_ftarr;
-	cudaMalloc(&d_ftarr, sizeof(int) * width * height * slice);
+	////rec_output.tifå­˜å‚¨ä½¿ç”¨ftæ•°ç»„é‡å»ºå¾—åˆ°çš„è·ç¦»å›¾
+	//std::string reconstructedOutputFile = "rec_output.tif";
+	//saveTiff(reconstructedOutputFile.c_str(), h_recDistPtr, size);
+	//free(h_recDistPtr);
+	//free(h_ftarr);
 
-	//ftarrÊý×é¼´ÎªIMA3D ÒªÇóµÄ£¬¾àÀë×î½ü±³¾°µãµÄÎ»ÖÃ¡£¸ù¾ÝÖ®Ç°¼ÆËãµÄparentÐÅÏ¢µ¹×Å¸ú×Ù¼ÆËãµÃµ½
-	findFtPoints(d_decompress, d_ftarr, d_parentPtr_compact, width, height, slice, newSize);
+	//cudaFree(d_activeMat_compact);
+	//cudaFree(d_parentPtr_compact);
+	//cudaFree(d_ftarr);
 
-	cudaDeviceSynchronize();
-	std::cerr << "findFtPoints cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
-	timer.update();
-
-	int* h_ftarr = (int*)malloc(sizeof(int) * width * height * slice);
-	cudaMemcpy(h_ftarr, d_ftarr, sizeof(int) * width * height * slice, cudaMemcpyDeviceToHost);
+	////////æµ‹è¯•2å®Œæ¯•
 
 
-	////ÑéÖ¤£ºÊ¹ÓÃftarrÖÐµÄÎ»ÖÃÖØÐÂ¼ÆËã¾àÀëÖµ£¬´æ´¢ÔÚÖØ½¨Êý×éh_distPtrÖÐ
-	unsigned char* h_recDistPtr = (unsigned char*)malloc(sizeof(unsigned char) * width * height * slice);
-	convertFtPoints2Dist(h_ftarr, h_recDistPtr, width, height, slice);
-	
-	//ÓÐÐèÒª¿ÉÒÔµ÷ÓÃhost°æ±¾µÄfindFtPoint
-	//findFtPointsHost(h_decompress, h_ftarr, h_parentPtr_compact, width, height, slice, newSize);
-	//free(h_parentPtr_compact);
-	//free(h_decompress);
-	
-	//output.tif´æ´¢featureTransForm()µÃµ½µÄ¾àÀëÍ¼
+	//output.tifå­˜å‚¨featureTransForm()å¾—åˆ°çš„è·ç¦»å›¾
 	std::string outputFile = "output.tif";
 
-	//rec_output.tif´æ´¢Ê¹ÓÃftÊý×éÖØ½¨µÃµ½µÄ¾àÀëÍ¼
-	std::string reconstructedOutputFile = "rec_output.tif";
+	unsigned char* h_distPtr = (unsigned char*)malloc(sizeof(unsigned char) * width * height * slice);
+	cudaMemcpy(h_distPtr, d_imagePtr, sizeof(unsigned char) * width * height * slice, cudaMemcpyDeviceToHost);
 
-	cudaMemcpy(h_imagePtr, d_imagePtr, sizeof(unsigned char) * width * height * slice, cudaMemcpyDeviceToHost);
+	saveTiff("tempimage.tif", h_distPtr, size);
+
+
+	cudaDeviceSynchronize();
+	std::cerr << "Malloc cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
+
+	for (int i = 0; i < width * height * slice; i++)
+	{
+		if (h_imagePtr[i] < globalThreshold) h_imagePtr[i] = 0;
+		else h_imagePtr[i] = 1;
+	}
+	
+	saveTiff("tempimage2.tif", h_imagePtr, size);
+
+
+	CDT2MAT(h_imagePtr, h_distPtr, xdim, ydim, zdim);
+
+	cudaDeviceSynchronize();
+	std::cerr << "CDT2MAT cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
+
+	finalProcessRaw(h_imagePtr, width * height * slice);
+
+	cudaDeviceSynchronize();
+	std::cerr << "FinalProcess cost " << timer.getTimerMilliSec() << "ms" << std::endl << std::endl;
+	timer.update();
+
 
 	saveTiff(outputFile.c_str(), h_imagePtr, size);
 
-	saveTiff(reconstructedOutputFile.c_str(), h_recDistPtr, size);
-
-	////////²âÊÔ2Íê±Ï
-
-	free(h_recDistPtr);
-	free(h_ftarr);
-
 	free(h_imagePtr);
+	free(h_distPtr);
 	cudaFree(d_imagePtr);
 	cudaFree(d_imagePtr_compact);
 	cudaFree(d_compress);
 	cudaFree(d_decompress);
-	cudaFree(d_activeMat_compact);
-	cudaFree(d_parentPtr_compact);
-	cudaFree(d_ftarr);
+	
 	return 0;
 }
