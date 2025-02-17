@@ -81,16 +81,19 @@
   </ItemDefinitionGroup>
   <ItemGroup>
     <CudaCompile Include="compaction.cu" />
+    <CudaCompile Include="direction.cu" />
     <CudaCompile Include="fastmarching.cu" />
-    <CudaCompile Include="IMA3D_20250116_version1.cu" />
+    <CudaCompile Include="IMA3D_20250214_final.cu" />
     <CudaCompile Include="threshold.cu" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="avs_io.h" />
     <ClInclude Include="compaction.h" />
+    <ClInclude Include="direction.h" />
     <ClInclude Include="fastmarching.h" />
     <ClInclude Include="image.h" />
     <ClInclude Include="loadTiff.h" />
+    <ClInclude Include="neuron.h" />
     <ClInclude Include="threshold.h" />
     <ClInclude Include="TimerClock.hpp" />
     <ClInclude Include="utils.h" />
@@ -100,6 +103,7 @@
     <ClCompile Include="avs_io.cpp" />
     <ClCompile Include="image.cpp" />
     <ClCompile Include="loadTiff.cpp" />
+    <ClCompile Include="neuron.cpp" />
     <ClCompile Include="volume.cpp" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
